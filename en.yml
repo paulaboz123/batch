@@ -1,33 +1,90 @@
-$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
-name: en
-endpoint_name: ${ENDPOINT_NAME}
-description: "EN model batch deployment"
-type: model
+- task: AzureCLI@2
+  name: deploy_managed_endpoint
+  displayName: Deploy Managed Endpoint
+  inputs:
+    azureSubscription: ${{parameters.serviceConnection}}
+    scriptType: bash
+    scriptLocation: inlineScript
+    failOnStandardError: false
+    inlineScript: |
+      set -e
 
-compute: azureml:${COMPUTE_EN}
+      az configure --defaults workspace=${{parameters.amlWorkspace}} group=${{parameters.resourceGroup}}
 
-# Model reference (latest) — set MODEL_NAME_* to a registered model name
-# To pin version, use: azureml:<name>:<version>
-model: azureml:${MODEL_NAME_EN}
+      ENDPOINT_FILE="endpoint-${{ lower(parameters.bu) }}.yml"
+      ENDPOINT_NAME=$(yq '.name' "$ENDPOINT_FILE")
+      KEY_VAULT_NAME=${{ parameters.keyVaultName }}
 
-code_configuration:
-  code: ../src
-  scoring_script: score.py
+      EXISTING_COUNT=$(az ml batch-endpoint list --query "[?name=='$ENDPOINT_NAME'] | length(@)" -o tsv)
 
-environment:
-  conda_file: ../src/conda.yml
-  image: mcr.microsoft.com/azureml/minimal-ubuntu22.04-py310-cpu-inference:latest
+      if [ "$EXISTING_COUNT" == "0" ]; then
+        echo "Create batch endpoint..."
+        az ml batch-endpoint create -f "$ENDPOINT_FILE"
+      else
+        echo "Update batch endpoint..."
+        az ml batch-endpoint update -f "$ENDPOINT_FILE"
+      fi
 
-resources:
-  instance_count: 1
+      # Jeśli dalej potrzebujesz klucza endpointu w KV (tak jak wcześniej)
+      ENDPOINT_KEY=$(az ml batch-endpoint get-credentials -n "$ENDPOINT_NAME" -o tsv --query primaryKey)
+      az keyvault secret set --vault-name "$KEY_VAULT_NAME" --name "UnifiedModelApiKey" --value "$ENDPOINT_KEY"
+  workingDirectory: src/deployment/managed_endpoint/${{parameters.environment}}/
 
-mini_batch_size: 10
-max_concurrency_per_instance: 2
-output_action: append_row
-output_file_name: predictions.jsonl
 
-retry_settings:
-  max_retries: 1
-  timeout: 3600
 
-logging_level: info
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+- task: AzureCLI@2
+  name: deploy_model_managed_endpoint
+  displayName: Deploy Model To Managed Endpoint
+  inputs:
+    azureSubscription: ${{parameters.serviceConnection}}
+    scriptType: bash
+    scriptLocation: inlineScript
+    failOnStandardError: false
+    inlineScript: |
+      set -e
+
+      az configure --defaults workspace=${{parameters.amlWorkspace}} group=${{parameters.resourceGroup}}
+
+      MODEL_FILE="model-${{ lower(parameters.bu) }}.yml"
+      ENDPOINT_NAME=$(yq '.endpoint_name' "$MODEL_FILE")
+      DEPLOYMENT_NAME=$(yq '.name' "$MODEL_FILE")
+
+      EXISTING_COUNT=$(az ml batch-deployment list -e "$ENDPOINT_NAME" --query "[?name=='$DEPLOYMENT_NAME'] | length(@)" -o tsv)
+
+      if [ "$EXISTING_COUNT" == "0" ]; then
+        echo "Create batch deployment for $DEPLOYMENT_NAME..."
+        az ml batch-deployment create -f "$MODEL_FILE"
+      else
+        echo "Update batch deployment for $DEPLOYMENT_NAME..."
+        az ml batch-deployment update -f "$MODEL_FILE"
+      fi
+
+      # Ustaw domyślny deployment (batch nie ma traffic split jak online)
+      az ml batch-endpoint update -n "$ENDPOINT_NAME" --set defaults.deployment_name="$DEPLOYMENT_NAME"
+  workingDirectory: src/deployment/managed_endpoint/${{parameters.environment}}/
+
+
+
+
+
+
+
+
+
+
+
+
