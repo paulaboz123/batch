@@ -1,0 +1,11 @@
+name: batch-score-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - pandas==2.2.2
+      - numpy==1.26.4
+      - scikit-learn==1.4.2
+      - joblib==1.3.2
