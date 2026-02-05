@@ -1,0 +1,4 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchEndpoint.schema.json
+name: ${{ENDPOINT_NAME}}
+description: "Batch endpoint with 3 language deployments (de/en/pl)"
+auth_mode: aad_token
