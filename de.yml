@@ -1,0 +1,33 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
+name: de
+endpoint_name: ${ENDPOINT_NAME}
+description: "DE model batch deployment"
+type: model
+
+compute: azureml:${COMPUTE_DE}
+
+# Model reference (latest) — set MODEL_NAME_* to a registered model name
+# To pin version, use: azureml:<name>:<version>
+model: azureml:${MODEL_NAME_DE}
+
+code_configuration:
+  code: ../src
+  scoring_script: score.py
+
+environment:
+  conda_file: ../src/conda.yml
+  image: mcr.microsoft.com/azureml/minimal-ubuntu22.04-py310-cpu-inference:latest
+
+resources:
+  instance_count: 1
+
+mini_batch_size: 10
+max_concurrency_per_instance: 2
+output_action: append_row
+output_file_name: predictions.jsonl
+
+retry_settings:
+  max_retries: 1
+  timeout: 3600
+
+logging_level: info
