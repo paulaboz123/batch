@@ -1,0 +1,91 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  AZURE_SUBSCRIPTION: 'aml-service-connection'
+
+steps:
+- task: AzureCLI@2
+  displayName: Install Azure ML CLI
+  inputs:
+    azureSubscription: $(AZURE_SUBSCRIPTION)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      az extension add -n ml -y || az extension update -n ml
+
+- task: AzureCLI@2
+  displayName: Create Batch Endpoint + Deployments (YAML)
+  inputs:
+    azureSubscription: $(AZURE_SUBSCRIPTION)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+
+      az configure --defaults \
+        group=$(RESOURCE_GROUP) \
+        workspace=$(WORKSPACE_NAME)
+
+      echo "=== Batch Endpoint ==="
+      az ml batch-endpoint create \
+        --file azureml/endpoint.batch.yml
+
+      echo "=== Deployments ==="
+      az ml batch-deployment create \
+        --file azureml/deployments/de.batch.yml
+
+      az ml batch-deployment create \
+        --file azureml/deployments/en.batch.yml
+
+      az ml batch-deployment create \
+        --file azureml/deployments/pl.batch.yml
+  env:
+    ENDPOINT_NAME: $(ENDPOINT_NAME)
+
+    COMPUTE_DE: $(COMPUTE_DE)
+    COMPUTE_EN: $(COMPUTE_EN)
+    COMPUTE_PL: $(COMPUTE_PL)
+
+    MODEL_NAME_DE: $(MODEL_NAME_DE)
+    MODEL_NAME_EN: $(MODEL_NAME_EN)
+    MODEL_NAME_PL: $(MODEL_NAME_PL)
+
+
+
+###########################################
+
+$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
+name: en
+endpoint_name: ${ENDPOINT_NAME}
+type: model
+
+model: azureml:${MODEL_NAME_EN}
+compute: azureml:${COMPUTE_EN}
+
+code_configuration:
+  code: ./src
+  scoring_script: score.py
+
+environment:
+  image: mcr.microsoft.com/azureml/minimal-ubuntu22.04-py310-cpu-inference:latest
+  conda_file: ./src/conda.yml
+
+resources:
+  instance_count: 1
+
+mini_batch_size: 10
+max_concurrency_per_instance: 2
+
+output_action: append_row
+output_file_name: predictions.jsonl
+
+retry_settings:
+  max_retries: 1
+  timeout: 3600
