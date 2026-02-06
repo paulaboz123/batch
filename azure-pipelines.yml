@@ -1,45 +1,124 @@
-trigger:
-  branches:
-    include:
-      - main
+trigger: none
+
+parameters:
+- name: serviceConnection
+  type: string
+  default: 'AZURE-SC'
+- name: resourceGroup
+  type: string
+  default: '<rg>'
+- name: workspace
+  type: string
+  default: '<workspace>'
+- name: environmentName
+  type: string
+  default: 'dev'
+- name: endpointFile
+  type: string
+  default: 'deployment/endpoint-dev.yml'
+- name: deployments
+  type: object
+  default:
+    - deployment/de-model.yml
+    - deployment/pl-model.yml
+    - deployment/en-model.yml
+- name: dataAssetFile
+  type: string
+  default: 'data/input-data.yml'
+- name: invokeDeployment
+  type: string
+  default: 'de-model'
 
 pool:
   vmImage: ubuntu-latest
 
-variables:
-  LOCATION: 'westeurope'
-
 steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.10'
-      addToPath: true
+- checkout: self
 
-  - script: |
-      python -m pip install --upgrade pip
-      pip install -r requirements-dev.txt
-    displayName: Install dependencies
+- task: AzureCLI@2
+  displayName: Install yq
+  inputs:
+    azureSubscription: ${{ parameters.serviceConnection }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+      sudo chmod +x /usr/local/bin/yq
+      yq --version
 
-  # This expects Workload Identity Federation / Managed Identity auth so DefaultAzureCredential works.
-  # Provide env vars in a Variable Group (recommended):
-  # SUBSCRIPTION_ID, RESOURCE_GROUP, WORKSPACE_NAME, ENDPOINT_NAME,
-  # COMPUTE_DE/EN/PL, MODEL_NAME_DE/EN/PL,
-  # plus Azure identity vars (AZURE_TENANT_ID, AZURE_CLIENT_ID, etc.) depending on your setup.
+- task: AzureCLI@2
+  displayName: Deploy batch endpoint (AAD)
+  inputs:
+    azureSubscription: ${{ parameters.serviceConnection }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      az configure --defaults group='${{ parameters.resourceGroup }}' workspace='${{ parameters.workspace }}'
+      ENDPOINT_NAME=$(yq '.name' '${{ parameters.endpointFile }}')
+      COUNT=$(az ml batch-endpoint list --query "[?name=='$ENDPOINT_NAME'] | length(@)" -o tsv)
+      if [ "$COUNT" = "0" ]; then
+        az ml batch-endpoint create -f '${{ parameters.endpointFile }}'
+      else
+        az ml batch-endpoint update -f '${{ parameters.endpointFile }}'
+      fi
 
-  - script: |
-      python scripts/create_or_update.py
-    displayName: Create/Update batch endpoint and deployments
-    env:
-      SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
-      RESOURCE_GROUP: $(RESOURCE_GROUP)
-      WORKSPACE_NAME: $(WORKSPACE_NAME)
-      ENDPOINT_NAME: $(ENDPOINT_NAME)
-      LOCATION: $(LOCATION)
+- task: AzureCLI@2
+  displayName: Deploy batch deployments
+  inputs:
+    azureSubscription: ${{ parameters.serviceConnection }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      az configure --defaults group='${{ parameters.resourceGroup }}' workspace='${{ parameters.workspace }}'
 
-      COMPUTE_DE: $(COMPUTE_DE)
-      COMPUTE_EN: $(COMPUTE_EN)
-      COMPUTE_PL: $(COMPUTE_PL)
+      for f in ${{ join(' ', parameters.deployments) }}; do
+        ENDPOINT_NAME=$(yq '.endpoint_name' "$f")
+        DEPLOYMENT_NAME=$(yq '.name' "$f")
+        COUNT=$(az ml batch-deployment list -e "$ENDPOINT_NAME" --query "[?name=='$DEPLOYMENT_NAME'] | length(@)" -o tsv)
+        if [ "$COUNT" = "0" ]; then
+          az ml batch-deployment create -f "$f"
+        else
+          az ml batch-deployment update -f "$f"
+        fi
+      done
 
-      MODEL_NAME_DE: $(MODEL_NAME_DE)
-      MODEL_NAME_EN: $(MODEL_NAME_EN)
-      MODEL_NAME_PL: $(MODEL_NAME_PL)
+      # set default to de-model (or whatever is in endpoint YAML)
+      ENDPOINT_FILE='${{ parameters.endpointFile }}'
+      ENDPOINT_NAME=$(yq '.name' "$ENDPOINT_FILE")
+      DEFAULT_DEPLOY=$(yq '.defaults.deployment_name' "$ENDPOINT_FILE")
+      az ml batch-endpoint update -n "$ENDPOINT_NAME" --set defaults.deployment_name="$DEFAULT_DEPLOY"
+
+- task: AzureCLI@2
+  displayName: Upload sample input as Data asset
+  inputs:
+    azureSubscription: ${{ parameters.serviceConnection }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      az configure --defaults group='${{ parameters.resourceGroup }}' workspace='${{ parameters.workspace }}'
+      az ml data create -f '${{ parameters.dataAssetFile }}'
+
+- task: AzureCLI@2
+  displayName: Invoke batch endpoint (smoke test)
+  inputs:
+    azureSubscription: ${{ parameters.serviceConnection }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -e
+      az configure --defaults group='${{ parameters.resourceGroup }}' workspace='${{ parameters.workspace }}'
+
+      ENDPOINT_NAME=$(yq '.name' '${{ parameters.endpointFile }}')
+      DATA_NAME=$(yq '.name' '${{ parameters.dataAssetFile }}')
+      DATA_VERSION=$(yq '.version' '${{ parameters.dataAssetFile }}')
+
+      OUT="azureml://datastores/workspaceblobstore/paths/batch_outputs/smoke/$(date +%s)/"
+
+      JOB_NAME=$(az ml batch-endpoint invoke         -n "$ENDPOINT_NAME"         --deployment-name '${{ parameters.invokeDeployment }}'         --input "azureml:$DATA_NAME:$DATA_VERSION"         --output-path "$OUT"         --query name -o tsv)
+
+      echo "Submitted job: $JOB_NAME"
+      az ml job show -n "$JOB_NAME" --query status -o tsv

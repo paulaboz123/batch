@@ -1,99 +1,66 @@
-\
 import json
 import os
+import logging
 from typing import Any, Dict, List, Union
 
-import joblib
-import numpy as np
-import pandas as pd
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-_model = None
-_label_map = None
+# --- Replace these globals with your real model objects ---
+_loaded = False
 
+def init():
+    global _loaded
+    # In real code: load artifacts from AZUREML_MODEL_DIR
+    model_dir = os.environ.get("AZUREML_MODEL_DIR")
+    logger.info(f"AZUREML_MODEL_DIR={model_dir}")
+    _loaded = True
 
-def init() -> None:
-    """Loads artifacts once per node."""
-    global _model, _label_map
+def _predict_one(rec: Dict[str, Any]) -> Dict[str, Any]:
+    # Keep input schema identical to your online endpoint
+    if "document" not in rec or "num_preds" not in rec:
+        raise ValueError("Expected keys: 'document' and 'num_preds'")
+    # TODO: call your existing inference(document, num_preds)
+    return {"ok": True, "num_preds": int(rec["num_preds"]), "document": rec["document"]}
 
-    model_dir = os.environ.get("AZUREML_MODEL_DIR", ".")
-    model_path = os.path.join(model_dir, "model.joblib")
-    label_map_path = os.path.join(model_dir, "label_map.json")
+def _read_json_or_jsonl(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    if not content:
+        return []
+    if content.startswith("{"):
+        return [json.loads(content)]
+    out = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
 
-    _model = joblib.load(model_path)
+def run(mini_batch: Union[List[str], "pandas.DataFrame"]):
+    if not _loaded:
+        # Safety: init should run first, but don't fail silently
+        init()
 
-    if os.path.exists(label_map_path):
-        with open(label_map_path, "r", encoding="utf-8") as f:
-            _label_map = json.load(f)
-    else:
-        _label_map = None
+    results = []
 
+    # Typical case: list of file paths
+    if isinstance(mini_batch, list):
+        for path in mini_batch:
+            for rec in _read_json_or_jsonl(path):
+                results.append(_predict_one(rec))
+        return results
 
-def _read_inputs(mini_batch: Union[List[str], pd.DataFrame]) -> pd.DataFrame:
-    """Supports JSONL/JSON, CSV, Parquet or direct DataFrame inputs."""
-    if isinstance(mini_batch, pd.DataFrame):
-        return mini_batch
+    # DataFrame case (if you configure tabular input)
+    try:
+        if hasattr(mini_batch, "to_dict"):
+            rows = mini_batch.to_dict(orient="records")
+            for rec in rows:
+                if isinstance(rec.get("document"), str):
+                    rec["document"] = json.loads(rec["document"])
+                results.append(_predict_one(rec))
+            return results
+    except Exception:
+        pass
 
-    rows: List[Dict[str, Any]] = []
-    for path in mini_batch:
-        lower = path.lower()
-        if lower.endswith(".jsonl") or lower.endswith(".json"):
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rows.append(json.loads(line))
-        elif lower.endswith(".csv"):
-            df = pd.read_csv(path)
-            rows.extend(df.to_dict(orient="records"))
-        elif lower.endswith(".parquet"):
-            df = pd.read_parquet(path)
-            rows.extend(df.to_dict(orient="records"))
-        else:
-            raise ValueError(f"Unsupported file type: {path}")
-
-    return pd.DataFrame.from_records(rows)
-
-
-def run(mini_batch: Union[List[str], pd.DataFrame]) -> List[Dict[str, Any]]:
-    """
-    Example expects input column:
-      - text: str
-    Optional:
-      - id: identifier
-    Adapt feature extraction to your model.
-    """
-    if _model is None:
-        raise RuntimeError("Model not initialized; init() not called.")
-
-    df = _read_inputs(mini_batch)
-
-    if "text" not in df.columns:
-        raise ValueError("Input must contain a 'text' column.")
-
-    texts = df["text"].astype(str).tolist()
-
-    if hasattr(_model, "predict_proba"):
-        proba = _model.predict_proba(texts)
-        preds = np.argmax(proba, axis=1)
-        conf = np.max(proba, axis=1)
-    else:
-        preds = _model.predict(texts)
-        conf = np.full(shape=(len(texts),), fill_value=np.nan)
-
-    outputs: List[Dict[str, Any]] = []
-    for i, pred in enumerate(preds):
-        label = str(pred)
-        if _label_map is not None:
-            label = _label_map.get(str(pred), label)
-
-        record_id = df["id"].iloc[i] if "id" in df.columns else i
-        outputs.append(
-            {
-                "id": record_id,
-                "label": label,
-                "confidence": float(conf[i]) if conf is not None and not np.isnan(conf[i]) else None,
-            }
-        )
-
-    return outputs
+    raise ValueError(f"Unsupported mini_batch type: {type(mini_batch)}")

@@ -1,0 +1,24 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
+name: de-model
+endpoint_name: albot-endpoint-dev
+
+# Use explicit model version in real prod, not @latest
+model: azureml:de@latest
+
+# MUST be an existing AML compute cluster (AmlCompute)
+compute: azureml:cpu-cluster
+
+# Pin a specific env version (do NOT use @latest in prod)
+environment: azureml:aml-v2:1
+
+code_configuration:
+  code: ../training
+  scoring_script: score.py
+
+resources:
+  instance_count: 1
+
+mini_batch_size: 1
+max_concurrency_per_instance: 1
+output_action: append_row
+output_file_name: predictions.jsonl

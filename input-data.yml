@@ -1,0 +1,6 @@
+$schema: https://azuremlschemas.azureedge.net/latest/data.schema.json
+name: albot-sample-input
+version: 1
+type: uri_folder
+path: ./sample_inputs
+description: Sample JSONL inputs for batch endpoint smoke test

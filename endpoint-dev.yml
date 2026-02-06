@@ -1,0 +1,5 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchEndpoint.schema.json
+name: albot-endpoint-dev
+auth_mode: aad_token
+defaults:
+  deployment_name: de-model
